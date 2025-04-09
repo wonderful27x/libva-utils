@@ -188,6 +188,8 @@ struct svcenc_context {
     int hierarchical_levels;
     int layer_brc;
 
+    bool support_packed_header;
+
     /* the info for next picture in encoding order */
     svcenc_surface next_svcenc_surface;
 
@@ -2352,6 +2354,8 @@ void
 svcenc_update_packed_buffers(struct svcenc_context *ctx,
                              svcenc_surface *current_surface)
 {
+    if(!ctx->support_packed_header) return;
+
     VAStatus va_status;
     VAEncPackedHeaderParameterBuffer packed_header_param_buffer;
     unsigned int length_in_bits;
@@ -2876,7 +2880,13 @@ svcenc_va_init(struct svcenc_context *ctx)
                                  VA_ENC_PACKED_HEADER_SLICE |
                                  VA_ENC_PACKED_HEADER_RAW_DATA)) == 0) {
         /* Can't find matched PACKED HEADER mode */
-        assert(0);
+        /* assert(0); */
+        fprintf(stderr, "No support VAConfigAttribEncPackedHeaders\n");
+        ctx->support_packed_header = false;
+    }
+    else
+    {
+        ctx->support_packed_header = true;
     }
 
     if (attrib_list[3].value == VA_ATTRIB_NOT_SUPPORTED) {
@@ -2911,11 +2921,13 @@ svcenc_va_init(struct svcenc_context *ctx)
                             VA_ENC_PACKED_HEADER_SLICE |
                             VA_ENC_PACKED_HEADER_RAW_DATA);
 
+    int config_num = ctx->support_packed_header ? 3 : 2;
+
     va_status = vaCreateConfig(ctx->va_dpy,
                                ctx->profile,
                                ENTRYPOINT,
                                attrib_list,
-                               3,
+                               config_num,
                                &ctx->config_id);
     CHECK_VASTATUS(va_status, "vaCreateConfig");
 
