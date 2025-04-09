@@ -102,6 +102,11 @@
 #define MIN(a, b)                       ((a) > (b) ? (b) : (a))
 #define MAX(a, b)                       ((a) > (b) ? (a) : (b))
 
+#define INPUT_IS_NV12 1
+#define GOP_SIZE 4
+static const VAEntrypoint ENTRYPOINT = VAEntrypointEncSliceLP;
+/* static const VAEntrypoint ENTRYPOINT = VAEntrypointEncSlice; */
+
 static VASurfaceID src_surfaces[NUM_SURFACES];
 static VASurfaceID rec_surfaces[NUM_SURFACES];
 static int src_surface_status[NUM_SURFACES];
@@ -1195,6 +1200,13 @@ upload_task(struct svcenc_context *ctx, unsigned int display_order, int surface)
     }
 
     if (surface_image.format.fourcc == VA_FOURCC_NV12) { /* UV plane */
+#if INPUT_IS_NV12
+        for (row = 0; row < surface_image.height / 2; row++) {
+            memcpy(u_dst, u_src, surface_image.width);
+            u_dst += surface_image.pitches[1];
+            u_src += ctx->width;
+        }
+#else
         for (row = 0; row < surface_image.height / 2; row++) {
             for (col = 0; col < surface_image.width / 2; col++) {
                 u_dst[col * 2] = u_src[col];
@@ -1205,6 +1217,7 @@ upload_task(struct svcenc_context *ctx, unsigned int display_order, int surface)
             u_src += (ctx->width / 2);
             v_src += (ctx->width / 2);
         }
+#endif
     } else {
         for (row = 0; row < surface_image.height / 2; row++) {
             for (col = 0; col < surface_image.width / 2; col++) {
@@ -1351,7 +1364,7 @@ parse_args(struct svcenc_context *ctx, int argc, char **argv)
 
     opterr = 0;
     optind = 5;
-    ctx->gop_size = 8;
+    ctx->gop_size = GOP_SIZE;
     ctx->gop_type = 0;
     ctx->bits_per_kbps = -1;
     ctx->rate_control_mode = VA_RC_CQP;
@@ -2543,11 +2556,29 @@ svcenc_store_coded_buffer(struct svcenc_context *ctx,
     VAStatus va_status;
     size_t w_items;
 
+#if 1
+    struct timeval tpstart, tpend, tpmap, tpsync;
+    float timeuse, timemap, timesync;
+    gettimeofday(&tpstart, NULL);
+#endif
+
     va_status = vaSyncSurface(ctx->va_dpy, src_surfaces[current_surface->slot_in_surfaces]);
     CHECK_VASTATUS(va_status, "vaSyncSurface");
 
+#if 1
+    gettimeofday(&tpsync, NULL);
+    timesync = 1000000 * (tpsync.tv_sec - tpstart.tv_sec) + tpsync.tv_usec - tpstart.tv_usec;
+    timesync /= 1000000;
+#endif
+
     va_status = vaMapBuffer(ctx->va_dpy, ctx->codedbuf_buf_id, (void **)(&coded_buffer_segment));
     CHECK_VASTATUS(va_status, "vaMapBuffer");
+
+#if 1
+    gettimeofday(&tpmap, NULL);
+    timemap = 1000000 * (tpmap.tv_sec - tpsync.tv_sec) + tpmap.tv_usec - tpsync.tv_usec;
+    timemap /= 1000000;
+#endif
 
     coded_mem = coded_buffer_segment->buf;
 
@@ -2563,6 +2594,15 @@ svcenc_store_coded_buffer(struct svcenc_context *ctx,
     } while (w_items != 1);
 
     vaUnmapBuffer(ctx->va_dpy, ctx->codedbuf_buf_id);
+
+#if 1
+    gettimeofday(&tpend, NULL);
+    timeuse = 1000000 * (tpend.tv_sec - tpstart.tv_sec) + tpend.tv_usec - tpstart.tv_usec;
+    timeuse /= 1000000;
+
+    fprintf(stderr, "Frame num: %d, temporal id: %d, time cost: (sync-unmap)%f-(sync)%f-(map)%f\n",
+            current_surface->frame_num, current_surface->temporal_id, timeuse, timesync, timemap);
+#endif
 
     return 0;
 }
@@ -2796,7 +2836,7 @@ svcenc_va_init(struct svcenc_context *ctx)
                              &num_entrypoints);
 
     for (entrypoint = 0; entrypoint < num_entrypoints; entrypoint++) {
-        if (entrypoint_list[entrypoint] == VAEntrypointEncSlice)
+        if (entrypoint_list[entrypoint] == ENTRYPOINT)
             break;
     }
 
@@ -2816,7 +2856,7 @@ svcenc_va_init(struct svcenc_context *ctx)
 
     vaGetConfigAttributes(ctx->va_dpy,
                           ctx->profile,
-                          VAEntrypointEncSlice,
+                          ENTRYPOINT,
                           &attrib_list[0],
                           4);
 
@@ -2841,6 +2881,7 @@ svcenc_va_init(struct svcenc_context *ctx)
 
     if (attrib_list[3].value == VA_ATTRIB_NOT_SUPPORTED) {
         ctx->layer_brc = 0; // force to 0
+        fprintf(stderr, "No support VAConfigAttribEncRateControlExt\n");
     } else {
         VAConfigAttribValEncRateControlExt *val = (VAConfigAttribValEncRateControlExt *)&attrib_list[3].value;
 
@@ -2856,7 +2897,12 @@ svcenc_va_init(struct svcenc_context *ctx)
 
         if (!val->bits.temporal_layer_bitrate_control_flag)
             ctx->layer_brc = 0; // force to 0
+
+        fprintf(stderr, "Max num temporal layers: %d, setting temporal levels: %d, temporal_layer_bitrate_control_flag: %d\n",
+            val->bits.max_num_temporal_layers_minus1 + 1, ctx->hierarchical_levels, val->bits.temporal_layer_bitrate_control_flag);
     }
+
+    fprintf(stderr, "Use layer_brc ? %d, used temporal levels: %d\n", ctx->layer_brc, ctx->hierarchical_levels);
 
     attrib_list[0].value = VA_RT_FORMAT_YUV420; /* set to desired RT format */
     attrib_list[1].value = ctx->rate_control_mode; /* set to desired RC mode */
@@ -2867,7 +2913,7 @@ svcenc_va_init(struct svcenc_context *ctx)
 
     va_status = vaCreateConfig(ctx->va_dpy,
                                ctx->profile,
-                               VAEntrypointEncSlice,
+                               ENTRYPOINT,
                                attrib_list,
                                3,
                                &ctx->config_id);
