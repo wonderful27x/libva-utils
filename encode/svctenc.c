@@ -188,7 +188,7 @@ struct svcenc_context {
     int hierarchical_levels;
     int layer_brc;
 
-    bool support_packed_header;
+    int support_packed_header;
 
     /* the info for next picture in encoding order */
     svcenc_surface next_svcenc_surface;
@@ -2882,11 +2882,11 @@ svcenc_va_init(struct svcenc_context *ctx)
         /* Can't find matched PACKED HEADER mode */
         /* assert(0); */
         fprintf(stderr, "No support VAConfigAttribEncPackedHeaders\n");
-        ctx->support_packed_header = false;
+        ctx->support_packed_header = 0;
     }
     else
     {
-        ctx->support_packed_header = true;
+        ctx->support_packed_header = 1;
     }
 
     if (attrib_list[3].value == VA_ATTRIB_NOT_SUPPORTED) {
